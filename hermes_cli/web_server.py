@@ -3717,6 +3717,14 @@ def _mount_plugin_api_routes():
 # Mount plugin API routes before the SPA catch-all.
 _mount_plugin_api_routes()
 
+# Mount nanobot agent-core and Docker Engine API proxies.
+try:
+    from hermes_cli.api_proxies import docker_router, nanobot_router
+    app.include_router(nanobot_router, prefix="/api")
+    app.include_router(docker_router, prefix="/api")
+except ImportError:
+    _log.warning("api_proxies not found — nanobot/docker proxy endpoints disabled")
+
 mount_spa(app)
 
 
