@@ -9983,9 +9983,10 @@ class AIAgent:
         print(f"⚠️  Reached maximum iterations ({self.max_iterations}). Requesting summary...")
 
         summary_request = (
-            "You've reached the maximum number of tool-calling iterations allowed. "
-            "Please provide a final response summarizing what you've found and accomplished so far, "
-            "without calling any more tools."
+            "This conversation is approaching its iteration limit. "
+            "Please provide a clear, concise summary of everything you've accomplished so far, "
+            "what remains undone, and any important findings or next steps — "
+            "so the session can be resumed cleanly. Do not call any tools."
         )
         messages.append({"role": "user", "content": summary_request})
 
@@ -10543,6 +10544,31 @@ class AIAgent:
             api_call_count += 1
             self._api_call_count = api_call_count
             self._touch_activity(f"starting API call #{api_call_count}")
+
+            # ── Proactive iteration warning ───────────────────────────────────
+            # Warn user before hitting the wall: 80% and 90% thresholds.
+            # At 90% we also flush state to state.db so session is safe to resume.
+            _iter_pct = api_call_count / self.max_iterations if self.max_iterations else 0
+            if _iter_pct >= 0.9 and not getattr(self, "_iter_90_warned", False):
+                self._iter_90_warned = True
+                self._flush_messages_to_session_db(messages, conversation_history)
+                _warn_msg = (
+                    f"\n⚠️  ALERT: Iteration limit nearly reached ({api_call_count}/{self.max_iterations}).\n"
+                    "    Your session state has been saved. The next API call will be the final one.\n"
+                    "    Finish any critical work now.\n"
+                )
+                self._emit_status(_warn_msg.strip())
+                if not self.quiet_mode:
+                    self._safe_print(_warn_msg)
+            elif _iter_pct >= 0.8 and not getattr(self, "_iter_80_warned", False):
+                self._iter_80_warned = True
+                _warn_msg = (
+                    f"\n⚠️  WARNING: {api_call_count}/{self.max_iterations} iterations used (80%).\n"
+                    "    Consider wrapping up or saving your progress.\n"
+                )
+                self._emit_status(_warn_msg.strip())
+                if not self.quiet_mode:
+                    self._safe_print(_warn_msg)
 
             # Grace call: the budget is exhausted but we gave the model one
             # more chance.  Consume the grace flag so the loop exits after
@@ -13578,6 +13604,7 @@ class AIAgent:
             "estimated_cost_usd": self.session_estimated_cost_usd,
             "cost_status": self.session_cost_status,
             "cost_source": self.session_cost_source,
+            "exit_reason": _turn_exit_reason,
         }
         # If a /steer landed after the final assistant turn (no more tool
         # batches to drain into), hand it back to the caller so it can be
