@@ -194,3 +194,180 @@ async def _forward_http(req: urllib.request.Request) -> dict:
             }
 
     return await asyncio.get_running_loop().run_in_executor(None, _do)
+
+# --------------------------------------------------------------------------
+# Docker Hub search
+# --------------------------------------------------------------------------
+
+misc_router = APIRouter(tags=["misc"])
+
+
+@misc_router.get("/docker/search")
+async def docker_hub_search(q: str = "", limit: int = 20):
+    """Search Docker Hub via the v2 API (no auth required)."""
+    import urllib.parse, urllib.request, json
+    if not q:
+        return []
+    url = f"https://hub.docker.com/v2/search/repositories/?query={urllib.parse.quote(q)}&page_size={limit}"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        return data.get("results", [])
+    except Exception:
+        return []
+
+
+@misc_router.get("/tunnels")
+async def list_tunnels():
+    """List active Cloudflare tunnels via cloudflared CLI."""
+    import subprocess, json
+    try:
+        result = subprocess.run(
+            ["cloudflared", "tunnel", "list", "--output", "json"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            tunnels = json.loads(result.stdout)
+            return [
+                {
+                    "name": t.get("name", t.get("id", "")),
+                    "url": (t.get("connections") or [{}])[0].get("uri", ""),
+                    "status": t.get("status", {}).get("string", "active"),
+                }
+                for t in tunnels
+            ]
+    except Exception:
+        pass
+    try:
+        result = subprocess.run(
+            ["cloudflared", "tunnel", "list"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            lines = result.stdout.strip().split("\n")
+            tunnels = []
+            for line in lines[1:]:
+                parts = line.split()
+                if len(parts) >= 3:
+                    tunnels.append({"name": parts[0], "url": parts[1], "status": parts[2]})
+            return tunnels
+    except Exception:
+        pass
+    return []
+
+
+# --------------------------------------------------------------------------
+# Filesystem browser
+# --------------------------------------------------------------------------
+
+
+files_router = APIRouter(prefix="/files", tags=["files"])
+
+
+@files_router.get("/list")
+async def list_directory(path: str = "/root"):
+    """List a directory's contents."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["ls", "-la", "--time-style=long-iso", path],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return []
+        lines = result.stdout.strip().split("\n")
+        entries = []
+        for line in lines[1:]:
+            if not line.strip():
+                continue
+            parts = line.split(None, 7)
+            if len(parts) < 8:
+                continue
+            mode = parts[0]
+            size = parts[4]
+            month, day, time_or_year = parts[5], parts[6], parts[7]
+            name = parts[7]
+            if " -> " in name:
+                name = name.split(" -> ")[0]
+            full_path = path.rstrip("/") + "/" + name if path != "/" else "/" + name
+            entries.append({
+                "name": name,
+                "path": full_path,
+                "type": "directory" if mode.startswith("d") else "file",
+                "size": int(size) if size.isdigit() else 0,
+                "modTime": f"{month} {day} {time_or_year}",
+            })
+        return entries
+    except Exception:
+        return []
+
+
+@files_router.get("/read")
+async def read_file(path: str):
+    """Return text content of a file."""
+    from fastapi.responses import PlainTextResponse
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read(1024 * 512)
+        return PlainTextResponse(content)
+    except Exception as e:
+        return PlainTextResponse(str(e), status_code=400)
+
+
+@files_router.post("/mkdir")
+async def make_directory(request: Request):
+    """Create a directory."""
+    import subprocess
+    body = await request.json()
+    dir_path = body.get("path", "/root")
+    name = body.get("name", "")
+    full = dir_path.rstrip("/") + "/" + name
+    result = subprocess.run(["mkdir", "-p", full], capture_output=True, text=True)
+    if result.returncode != 0:
+        return {"error": result.stderr or "mkdir failed"}
+    return {"ok": True, "path": full}
+
+
+@files_router.delete("/delete")
+async def delete_path(request: Request):
+    """Delete a file or directory."""
+    import subprocess
+    body = await request.json()
+    target = body.get("path", "")
+    if not target:
+        return {"error": "No path provided"}
+    if target in ["/", "/root", "/home", "/var", "/etc", "/usr"]:
+        return {"error": "Refusing to delete protected path"}
+    result = subprocess.run(["rm", "-rf", target], capture_output=True, text=True)
+    if result.returncode != 0:
+        return {"error": result.stderr or "Delete failed"}
+    return {"ok": True}
+
+
+@files_router.get("/download")
+async def download_file(path: str):
+    """Serve a file for download."""
+    from fastapi.responses import FileResponse
+    from pathlib import Path
+    safe_path = Path(path).resolve()
+    if not safe_path.exists():
+        return {"error": "File not found"}
+    return FileResponse(path=safe_path, filename=safe_path.name)
+
+
+@files_router.post("/upload")
+async def upload_file(request: Request):
+    """Upload a file to a directory."""
+    import os
+    form = await request.form()
+    file = form.get("file")
+    dest_dir = form.get("path", "/root")
+    if not file:
+        return {"error": "No file provided"}
+    filename = file.filename or "uploaded"
+    dest = os.path.join(dest_dir, filename)
+    content = await file.read()
+    with open(dest, "wb") as f:
+        f.write(content)
+    return {"ok": True, "path": dest}

@@ -3719,9 +3719,11 @@ _mount_plugin_api_routes()
 
 # Mount nanobot agent-core and Docker Engine API proxies.
 try:
-    from hermes_cli.api_proxies import docker_router, nanobot_router
+    from hermes_cli.api_proxies import docker_router, nanobot_router, files_router, misc_router
     app.include_router(nanobot_router, prefix="/api")
     app.include_router(docker_router, prefix="/api")
+    app.include_router(files_router, prefix="/api")
+    app.include_router(misc_router, prefix="/api")
 except ImportError:
     _log.warning("api_proxies not found — nanobot/docker proxy endpoints disabled")
 
